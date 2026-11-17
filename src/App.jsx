@@ -20,7 +20,13 @@ import {
   Clock,
   Settings,
   X,
-  Timer
+  Timer,
+  Maximize2,
+  Monitor,
+  RotateCcw,
+  RotateCw,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 const DEFAULT_MACROS = [
@@ -54,27 +60,205 @@ function formatDisplayTime(seconds) {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-export default function App() {
-  // Referencias
+// ============================================================================
+// 1. VENTANA DE VIDEO (Dedicada para OBS / Pantalla Completa F11 / Ultra Limpia)
+// ============================================================================
+function VideoWindow() {
   const videoRef = useRef(null);
+  const [videoSource, setVideoSource] = useState(null); // { fileName, fileUrl }
+  const [currentCaption, setCurrentCaption] = useState('');
+  const [showCaptions, setShowCaptions] = useState(true);
+  const [notification, setNotification] = useState('');
+
+  const triggerNotification = (text) => {
+    setNotification(text);
+    setTimeout(() => setNotification(''), 2200);
+  };
+
+  // Escuchar órdenes remotas enviadas desde la consola de estudio
+  useEffect(() => {
+    if (!window.loquendoAPI) return;
+
+    // Acciones de video (load, play, pause, seek, volume, toggle-captions)
+    const unsubVideoAction = window.loquendoAPI.onVideoAction((action) => {
+      if (!action) return;
+
+      switch (action.type) {
+        case 'load':
+          setVideoSource(action.payload);
+          triggerNotification(`Video cargado: ${action.payload?.fileName || ''}`);
+          break;
+
+        case 'play':
+          if (videoRef.current) {
+            videoRef.current.play().catch(() => {});
+          }
+          break;
+
+        case 'pause':
+          if (videoRef.current) {
+            videoRef.current.pause();
+          }
+          break;
+
+        case 'seek':
+          if (videoRef.current && typeof action.payload?.time === 'number') {
+            videoRef.current.currentTime = action.payload.time;
+          }
+          break;
+
+        case 'volume':
+          if (videoRef.current) {
+            if (typeof action.payload?.volume === 'number') {
+              videoRef.current.volume = action.payload.volume;
+            }
+            if (typeof action.payload?.muted === 'boolean') {
+              videoRef.current.muted = action.payload.muted;
+            }
+          }
+          break;
+
+        case 'toggle-captions':
+          setShowCaptions((prev) => (action.payload !== undefined ? Boolean(action.payload) : !prev));
+          break;
+
+        default:
+          break;
+      }
+    });
+
+    // Subtítulos flotantes de Loquendo en tiempo real
+    const unsubSpeaking = window.loquendoAPI.onEvent('tts:speaking', (data) => {
+      if (data?.item?.text) {
+        setCurrentCaption(data.item.text);
+      }
+    });
+
+    const unsubFinished = window.loquendoAPI.onEvent('tts:item-finished', () => {
+      setCurrentCaption('');
+    });
+
+    const unsubPanic = window.loquendoAPI.onEvent('tts:panic', () => {
+      setCurrentCaption('');
+    });
+
+    const unsubFullscreen = window.loquendoAPI.onEvent('window:fullscreen-change', (isFull) => {
+      triggerNotification(isFull ? 'Pantalla Completa Activa (F11)' : 'Modo Ventana');
+    });
+
+    return () => {
+      unsubVideoAction();
+      unsubSpeaking();
+      unsubFinished();
+      unsubPanic();
+      unsubFullscreen();
+    };
+  }, []);
+
+  // Enviar estado de reproducción hacia el Estudio periódicamente
+  const handleTimeUpdate = () => {
+    if (!videoRef.current || !window.loquendoAPI) return;
+    window.loquendoAPI.sendVideoStatus({
+      isConnected: true,
+      currentTime: videoRef.current.currentTime || 0,
+      duration: videoRef.current.duration || 0,
+      isPlaying: !videoRef.current.paused,
+      videoSource
+    });
+  };
+
+  // Alternar pantalla completa con F11 localmente
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'F11') {
+        e.preventDefault();
+        if (window.loquendoAPI) {
+          window.loquendoAPI.toggleVideoFullScreen();
+        } else {
+          if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(() => {});
+          } else {
+            document.exitFullscreen().catch(() => {});
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  return (
+    <div className="w-screen h-screen bg-black overflow-hidden relative flex items-center justify-center select-none">
+      {videoSource?.fileUrl ? (
+        <video
+          ref={videoRef}
+          src={videoSource.fileUrl}
+          className="w-full h-full object-contain bg-black"
+          onTimeUpdate={handleTimeUpdate}
+          onPlay={handleTimeUpdate}
+          onPause={handleTimeUpdate}
+          onLoadedMetadata={handleTimeUpdate}
+          autoPlay={false}
+        />
+      ) : (
+        <div className="flex flex-col items-center justify-center text-center p-8 text-zinc-600">
+          <Monitor className="w-16 h-16 mb-4 text-zinc-700 animate-pulse" />
+          <h2 className="text-lg font-bold text-zinc-400">
+            Pantalla de Video para Captura / OBS
+          </h2>
+          <p className="text-xs text-zinc-600 mt-1 max-w-sm">
+            Selecciona un video desde la Consola de Estudio. Presiona <kbd className="px-1.5 py-0.5 bg-zinc-800 text-zinc-400 rounded text-[11px] font-mono">F11</kbd> para pantalla completa limpia.
+          </p>
+        </div>
+      )}
+
+      {/* Subtítulos Flotantes de Loquendo (Alta legibilidad para captura en OBS) */}
+      {showCaptions && currentCaption && (
+        <div className="absolute bottom-10 left-1/2 -translate-x-1/2 max-w-[88%] text-center pointer-events-none z-30 transition-all duration-200">
+          <span className="inline-block px-5 py-2.5 rounded-xl bg-black/85 border border-zinc-800/80 shadow-2xl backdrop-blur-md">
+            <span className="text-xl md:text-2xl font-extrabold text-amber-300 tracking-wide drop-shadow-[0_2px_10px_rgba(0,0,0,1)] leading-relaxed">
+              {currentCaption}
+            </span>
+          </span>
+        </div>
+      )}
+
+      {/* Notificación sutil y temporal (se desvanece rápido) */}
+      {notification && (
+        <div className="absolute top-5 left-1/2 -translate-x-1/2 bg-zinc-900/90 border border-zinc-800 text-zinc-200 text-xs px-3.5 py-1.5 rounded-full shadow-lg pointer-events-none animate-fade-in backdrop-blur-sm z-40">
+          {notification}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 2. CONSOLA DE ESTUDIO (Ventana Principal de Control, Redacción y Macros)
+// ============================================================================
+function StudioWindow() {
   const inputRef = useRef(null);
   const autoPausedByTypingRef = useRef(false);
   const idleTimerRef = useRef(null);
 
-  // Estado del reproductor de video
-  const [videoSource, setVideoSource] = useState(null); // { fileName, fileUrl }
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [videoVolume, setVideoVolume] = useState(0.75);
+  // Estado sincronizado del reproductor de video en la Ventana 2
+  const [videoStatus, setVideoStatus] = useState({
+    isConnected: true,
+    currentTime: 0,
+    duration: 0,
+    isPlaying: false,
+    videoSource: null
+  });
+  const [videoVolume, setVideoVolume] = useState(0.8);
   const [isVideoMuted, setIsVideoMuted] = useState(false);
+  const [showCaptionsOnVideo, setShowCaptionsOnVideo] = useState(true);
 
-  // Modos de escritura: 'REALTIME' (Habla continua por bloques) | 'SMART_PAUSE' (Pausa al escribir, Enter envía y reanuda)
+  // Modos de redacción: 'REALTIME' (Habla continua por bloques) | 'SMART_PAUSE' (Pausa al escribir, Enter habla y reanuda)
   const [typingMode, setTypingMode] = useState('REALTIME');
   const [inputText, setInputText] = useState('');
   const [autoPausedIndicator, setAutoPausedIndicator] = useState(false);
 
-  // Tamaño del bloque para habla continua: dispara automáticamente al completar N palabras (1 a 8)
+  // Tamaño de bloque para habla continua (1 a 8 palabras, default 3)
   const [chunkSize, setChunkSize] = useState(() => {
     try {
       const saved = localStorage.getItem('loquendo_chunk_size');
@@ -84,7 +268,7 @@ export default function App() {
     }
   });
 
-  // Configuración de Inactividad (Auto-envío tras tiempo sin escribir)
+  // Configuración de auto-envío por inactividad
   const [idleAutoSend, setIdleAutoSend] = useState(() => {
     try {
       const saved = localStorage.getItem('loquendo_idle_enabled');
@@ -103,27 +287,16 @@ export default function App() {
     }
   });
 
-  // Estado del modal de Ajustes de Ritmo
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Persistir ajustes en localStorage
+  // Persistir ajustes
   useEffect(() => {
     try {
       localStorage.setItem('loquendo_chunk_size', String(chunkSize));
-    } catch (_) {}
-  }, [chunkSize]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem('loquendo_idle_enabled', String(idleAutoSend));
-    } catch (_) {}
-  }, [idleAutoSend]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem('loquendo_idle_timeout', String(idleTimeoutSec));
     } catch (_) {}
-  }, [idleTimeoutSec]);
+  }, [chunkSize, idleAutoSend, idleTimeoutSec]);
 
   // Estado del puente TTS (SAPI 5 / Loquendo)
   const [ttsState, setTtsState] = useState({
@@ -153,7 +326,7 @@ export default function App() {
     }
   });
   const [editingMacros, setEditingMacros] = useState(false);
-  const [subtitlesLog, setSubtitlesLog] = useState([]); // [{ id, text, startTime, endTime }]
+  const [subtitlesLog, setSubtitlesLog] = useState([]);
 
   // Guardar macros en localStorage
   useEffect(() => {
@@ -162,34 +335,43 @@ export default function App() {
     } catch (_) {}
   }, [macros]);
 
-  // Enviar texto a Loquendo y registrar en el historial de subtítulos .SRT
-  const sendToLoquendo = useCallback(async (rawText, options = {}) => {
-    const clean = String(rawText || '').trim();
-    if (!clean) return;
-
-    const vidTime = videoRef.current ? videoRef.current.currentTime : 0;
-    const wordCount = clean.split(/\s+/).length;
-    // Estimación de duración de lectura para el bloque SRT (mínimo 1.6s)
-    const estimatedDuration = Math.max(1.6, Math.min(8.0, wordCount * 0.42));
-
-    setSubtitlesLog((prev) => [
-      ...prev,
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        text: clean,
-        startTime: vidTime,
-        endTime: vidTime + estimatedDuration
-      }
-    ]);
-
-    if (window.loquendoAPI) {
-      await window.loquendoAPI.enqueue({
-        text: clean,
-        videoTime: vidTime,
-        resumeAfter: Boolean(options.resumeAfter)
-      });
+  // Enviar ordenes remotas al reproductor de video en la Ventana 2
+  const sendVideoCommand = useCallback((type, payload = {}) => {
+    if (window.loquendoAPI?.sendVideoAction) {
+      window.loquendoAPI.sendVideoAction({ type, payload });
     }
   }, []);
+
+  // Enviar texto a Loquendo y registrar en subtítulos .SRT
+  const sendToLoquendo = useCallback(
+    async (rawText, options = {}) => {
+      const clean = String(rawText || '').trim();
+      if (!clean) return;
+
+      const vidTime = videoStatus.currentTime || 0;
+      const wordCount = clean.split(/\s+/).length;
+      const estimatedDuration = Math.max(1.6, Math.min(8.0, wordCount * 0.42));
+
+      setSubtitlesLog((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          text: clean,
+          startTime: vidTime,
+          endTime: vidTime + estimatedDuration
+        }
+      ]);
+
+      if (window.loquendoAPI) {
+        await window.loquendoAPI.enqueue({
+          text: clean,
+          videoTime: vidTime,
+          resumeAfter: Boolean(options.resumeAfter)
+        });
+      }
+    },
+    [videoStatus.currentTime]
+  );
 
   // Botón / Atajo de pánico (Esc)
   const triggerPanic = useCallback(async () => {
@@ -229,12 +411,20 @@ export default function App() {
     };
   }, [inputText, idleAutoSend, idleTimeoutSec, typingMode, sendToLoquendo]);
 
-  // Conexión con eventos IPC del proceso principal
+  // Suscripción a eventos IPC del backend y de la Ventana de Video
   useEffect(() => {
     if (!window.loquendoAPI) return;
 
+    // Estado inicial de TTS
     window.loquendoAPI.getState().then((initial) => {
       if (initial) setTtsState(initial);
+    });
+
+    // Recepción continua del estado de video desde la Ventana 2
+    const unsubVideoStatus = window.loquendoAPI.onVideoStatus((status) => {
+      if (status) {
+        setVideoStatus((prev) => ({ ...prev, ...status }));
+      }
     });
 
     const unsubVoices = window.loquendoAPI.onEvent('tts:voices', (data) => {
@@ -250,21 +440,22 @@ export default function App() {
       setTtsState(state);
     });
 
+    // Si el video fue pausado automáticamente en Modo Pausa Inteligente, reanudarlo cuando la cola termine
     const unsubQueueEmpty = window.loquendoAPI.onEvent('tts:queue-empty', () => {
-      // Si el video fue pausado automáticamente por el Modo Pausa Inteligente, reanudarlo al terminar de hablar
-      if (autoPausedByTypingRef.current && videoRef.current) {
+      if (autoPausedByTypingRef.current) {
         autoPausedByTypingRef.current = false;
         setAutoPausedIndicator(false);
-        videoRef.current.play().catch(() => {});
+        sendVideoCommand('play');
       }
     });
 
     return () => {
+      unsubVideoStatus();
       unsubVoices();
       unsubStatus();
       unsubQueueEmpty();
     };
-  }, []);
+  }, [sendVideoCommand]);
 
   // Atajos globales de teclado: Tab (cambiar modo), Esc (Pánico / Cerrar ajustes), F1-F8 (Macros rápidas)
   useEffect(() => {
@@ -288,7 +479,7 @@ export default function App() {
         return;
       }
 
-      // F1 a F8: Disparar Macros Rápidas sin interrumpir el gameplay
+      // F1 a F8: Disparar Macros Rápidas
       if (/^F([1-8])$/.test(e.key)) {
         e.preventDefault();
         const macro = macros.find((m) => m.key === e.key);
@@ -305,7 +496,7 @@ export default function App() {
   // Manejo de escritura en el input inferior según el modo activo
   const handleInputKeyDown = (e) => {
     if (typingMode === 'REALTIME') {
-      // 1. Tecla Enter: Dispara inmediatamente todo el texto acumulado sin esperar a completar el bloque
+      // 1. Tecla Enter: Dispara inmediatamente todo el texto acumulado
       if (e.key === 'Enter') {
         e.preventDefault();
         const currentVal = inputText.trim();
@@ -335,27 +526,24 @@ export default function App() {
           return;
         }
 
-        // Si con esta palabra se alcanza o supera el tamaño configurado (ej. 3 palabras)
         if (words.length >= chunkSize) {
           e.preventDefault();
           sendToLoquendo(words.join(' '), { resumeAfter: false });
           setInputText('');
         }
-        // Si aún no alcanza el bloque, permite insertar el espacio y continuar escribiendo
       }
     } else if (typingMode === 'SMART_PAUSE') {
-      // Modo 2: Pausa Inteligente -> Enter envía toda la oración y reanuda el video cuando termine de hablar
+      // Modo 2: Pausa Inteligente -> Enter envía toda la oración y reanuda el video al terminar
       if (e.key === 'Enter') {
         e.preventDefault();
         const currentVal = inputText.trim();
         if (currentVal.length > 0) {
           sendToLoquendo(currentVal, { resumeAfter: true });
           setInputText('');
-        } else if (autoPausedByTypingRef.current && videoRef.current) {
-          // Si presionó Enter con el campo vacío, simplemente reanuda el video
+        } else if (autoPausedByTypingRef.current) {
           autoPausedByTypingRef.current = false;
           setAutoPausedIndicator(false);
-          videoRef.current.play().catch(() => {});
+          sendVideoCommand('play');
         }
       }
     }
@@ -365,74 +553,68 @@ export default function App() {
     const val = e.target.value;
     setInputText(val);
 
-    // En Modo Pausa Inteligente, al empezar a escribir cualquier letra, pausamos el video automáticamente
+    // En Modo Pausa Inteligente, al empezar a redactar cualquier letra, pausamos la Ventana de Video
     if (typingMode === 'SMART_PAUSE' && val.trim().length > 0) {
-      if (videoRef.current && !videoRef.current.paused) {
-        videoRef.current.pause();
+      if (videoStatus.isPlaying) {
+        sendVideoCommand('pause');
         autoPausedByTypingRef.current = true;
         setAutoPausedIndicator(true);
       }
     }
   };
 
-  // Cargar archivo de video local (vía diálogo nativo de Electron o input fallback)
+  // Selector nativo de video (abre diálogo y envía orden de carga a la Ventana 2)
   const handleOpenVideo = async () => {
     if (window.loquendoAPI) {
       const selected = await window.loquendoAPI.openVideoDialog();
       if (selected) {
-        setVideoSource(selected);
-        setCurrentTime(0);
+        sendVideoCommand('load', selected);
       }
     }
   };
 
-  const handleFallbackFileInput = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    setVideoSource({ fileName: file.name, fileUrl: url });
-    setCurrentTime(0);
-  };
-
-  // Controles de reproducción de video
+  // Controles de transporte remotos
   const togglePlay = () => {
-    if (!videoRef.current || !videoSource) return;
-    if (videoRef.current.paused) {
+    if (videoStatus.isPlaying) {
+      sendVideoCommand('pause');
+    } else {
       autoPausedByTypingRef.current = false;
       setAutoPausedIndicator(false);
-      videoRef.current.play();
-    } else {
-      videoRef.current.pause();
+      sendVideoCommand('play');
     }
     if (inputRef.current) inputRef.current.focus();
   };
 
   const handleSeek = (e) => {
-    const newTime = parseFloat(e.target.value);
-    setCurrentTime(newTime);
-    if (videoRef.current) {
-      videoRef.current.currentTime = newTime;
-    }
+    const time = parseFloat(e.target.value);
+    sendVideoCommand('seek', { time });
   };
 
-  const handleVideoVolumeChange = (e) => {
-    const v = parseFloat(e.target.value);
-    setVideoVolume(v);
-    setIsVideoMuted(v === 0);
-    if (videoRef.current) {
-      videoRef.current.volume = v;
-      videoRef.current.muted = v === 0;
-    }
+  const handleSkip = (seconds) => {
+    const newTime = Math.max(0, Math.min(videoStatus.duration, videoStatus.currentTime + seconds));
+    sendVideoCommand('seek', { time: newTime });
   };
 
-  const toggleMuteVideo = () => {
-    if (!videoRef.current) return;
+  const handleVolumeChange = (e) => {
+    const vol = parseFloat(e.target.value);
+    setVideoVolume(vol);
+    setIsVideoMuted(vol === 0);
+    sendVideoCommand('volume', { volume: vol, muted: vol === 0 });
+  };
+
+  const toggleMute = () => {
     const nextMuted = !isVideoMuted;
     setIsVideoMuted(nextMuted);
-    videoRef.current.muted = nextMuted;
+    sendVideoCommand('volume', { volume: videoVolume, muted: nextMuted });
   };
 
-  // Actualizar configuración de voz SAPI 5 / Loquendo
+  const toggleCaptionsRemotely = () => {
+    const next = !showCaptionsOnVideo;
+    setShowCaptionsOnVideo(next);
+    sendVideoCommand('toggle-captions', next);
+  };
+
+  // Configuración de voz SAPI 5
   const updateTTSConfig = async (patch) => {
     if (!window.loquendoAPI) return;
     const updated = await window.loquendoAPI.setConfig(patch);
@@ -447,7 +629,7 @@ export default function App() {
     }
   };
 
-  // Construir y exportar archivo .SRT
+  // Exportar archivo .SRT
   const handleExportSRT = async () => {
     if (subtitlesLog.length === 0) return;
 
@@ -457,65 +639,84 @@ export default function App() {
       return `${idx + 1}\n${start} --> ${end}\n${entry.text}\n`;
     });
     const srtContent = srtBlocks.join('\n');
-    const baseName = videoSource?.fileName
-      ? `${videoSource.fileName.replace(/\.[^/.]+$/, '')}.srt`
-      : 'loquendo-reaccion.srt';
+    const baseName = videoStatus.videoSource?.fileName
+      ? `${videoStatus.videoSource.fileName.replace(/\.[^/.]+$/, '')}.srt`
+      : 'reaccion-loquendo.srt';
 
     if (window.loquendoAPI) {
       await window.loquendoAPI.saveSrtDialog({
         defaultName: baseName,
         content: srtContent
       });
-    } else {
-      // Fallback navegador
-      const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = baseName;
-      link.click();
     }
   };
 
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
-      {/* BARRA SUPERIOR DE ESTUDIO */}
-      <header className="h-14 border-b border-zinc-800/80 bg-zinc-900/70 px-4 flex items-center justify-between gap-4 shrink-0">
-        {/* Marca + Selector de Video */}
-        <div className="flex items-center gap-3">
+      {/* 1. BARRA SUPERIOR DE ESTUDIO */}
+      <header className="h-14 border-b border-zinc-800/80 bg-zinc-900/80 px-4 flex items-center justify-between gap-3 shrink-0">
+        {/* Identidad + Selector de Video + Botón de Ventana de Video F11 */}
+        <div className="flex items-center gap-2.5">
           <div className="flex items-center gap-2 bg-zinc-950 border border-zinc-800 px-3 py-1.5 rounded-md">
             <Radio className={`w-4 h-4 ${ttsState.isSpeaking ? 'text-emerald-400 animate-pulse' : 'text-zinc-500'}`} />
             <span className="font-bold tracking-tight text-sm text-zinc-100">LOQUENDO</span>
             <span className="text-[11px] font-mono uppercase px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              Reaction Studio
+              Studio
             </span>
           </div>
 
           <button
             onClick={handleOpenVideo}
             className="flex items-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-medium px-3 py-1.5 rounded-md border border-zinc-700 transition"
-            title="Cargar Gameplay (.mp4, .mkv, .webm)"
+            title="Seleccionar archivo de gameplay (.mp4, .mkv, .webm)"
           >
             <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
-            <span>{videoSource ? videoSource.fileName : 'Cargar Video'}</span>
+            <span className="max-w-[160px] truncate">
+              {videoStatus.videoSource ? videoStatus.videoSource.fileName : 'Cargar Video'}
+            </span>
           </button>
 
-          {/* Fallback oculto por si se abre en navegador durante pruebas */}
-          {!window.loquendoAPI && (
-            <label className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-200 underline">
-              Archivo local
-              <input type="file" accept="video/*,.mkv" onChange={handleFallbackFileInput} className="hidden" />
-            </label>
-          )}
+          {/* Botón para enfocar / abrir la Ventana de Video y pantalla completa F11 */}
+          <button
+            onClick={() => window.loquendoAPI?.openVideoWindow()}
+            className="flex items-center gap-1.5 bg-zinc-950 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 px-3 py-1.5 rounded-md text-xs font-medium transition"
+            title="Abrir o enfocar la Ventana de Video independiente para OBS"
+          >
+            <Monitor className="w-3.5 h-3.5 text-blue-400" />
+            <span>Ventana de Video</span>
+          </button>
+
+          <button
+            onClick={() => window.loquendoAPI?.toggleVideoFullScreen()}
+            className="flex items-center gap-1 bg-zinc-950 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 px-2.5 py-1.5 rounded-md text-xs font-mono transition"
+            title="Conmutar Pantalla Completa en la ventana del video (F11)"
+          >
+            <Maximize2 className="w-3.5 h-3.5 text-amber-400" />
+            <span>F11</span>
+          </button>
+
+          <button
+            onClick={toggleCaptionsRemotely}
+            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium border transition ${
+              showCaptionsOnVideo
+                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                : 'bg-zinc-950 text-zinc-500 border-zinc-800'
+            }`}
+            title="Mostrar u ocultar subtítulos flotantes de Loquendo en la ventana de video"
+          >
+            {showCaptionsOnVideo ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            <span>Subtítulos</span>
+          </button>
         </div>
 
-        {/* Selector de Voz SAPI 5 / Loquendo + Controles de Velocidad */}
-        <div className="flex items-center gap-3">
+        {/* Selector de Voz SAPI 5 / Loquendo + Velocidad */}
+        <div className="flex items-center gap-2.5">
           <div className="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded-md px-2.5 py-1">
-            <span className="text-[11px] text-zinc-400 font-medium">Voz SAPI 5:</span>
+            <span className="text-[11px] text-zinc-400 font-medium">Voz:</span>
             <select
               value={ttsState.selectedVoice}
               onChange={(e) => updateTTSConfig({ voice: e.target.value })}
-              className="bg-transparent text-xs text-zinc-100 font-medium focus:outline-none max-w-[240px] truncate cursor-pointer"
+              className="bg-transparent text-xs text-zinc-100 font-medium focus:outline-none max-w-[200px] truncate cursor-pointer"
             >
               {ttsState.voices.length === 0 ? (
                 <option value="" className="bg-zinc-900 text-zinc-400">
@@ -531,17 +732,16 @@ export default function App() {
             </select>
             <button
               onClick={toggleArchMode}
-              title={`Arquitectura actual: ${ttsState.archMode}. Haz clic para alternar entre 32-bit (Loquendo clásico) y 64-bit.`}
+              title={`Arquitectura: ${ttsState.archMode}. Haz clic para alternar entre 32-bit (Loquendo clásico) y 64-bit.`}
               className="ml-1 px-1.5 py-0.5 text-[10px] font-mono rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition"
             >
-              {prefer32Bit ? '32-bit (Loquendo)' : '64-bit'}
+              {prefer32Bit ? '32-bit' : '64-bit'}
             </button>
           </div>
 
-          {/* Velocidad Base y Turbo Automático */}
           <div className="flex items-center gap-2 bg-zinc-950 border border-zinc-800 rounded-md px-2.5 py-1">
             <Sliders className="w-3.5 h-3.5 text-zinc-400" />
-            <span className="text-[11px] text-zinc-400">Rate Base:</span>
+            <span className="text-[11px] text-zinc-400">Rate:</span>
             <input
               type="range"
               min="-5"
@@ -549,34 +749,31 @@ export default function App() {
               step="1"
               value={ttsState.baseRate}
               onChange={(e) => updateTTSConfig({ baseRate: Number(e.target.value) })}
-              className="w-20 accent-amber-500 cursor-pointer"
+              className="w-16 accent-amber-500 cursor-pointer"
             />
-            <span className="text-xs font-mono w-5 text-center text-zinc-200">{ttsState.baseRate}</span>
+            <span className="text-xs font-mono w-4 text-center text-zinc-200">{ttsState.baseRate}</span>
 
             {ttsState.isBoosted && (
               <span className="flex items-center gap-1 text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 rounded animate-pulse">
-                <Zap className="w-3 h-3" /> TURBO ({ttsState.effectiveRate})
+                <Zap className="w-3 h-3" /> TURBO
               </span>
             )}
           </div>
-        </div>
 
-        {/* Botón de Pánico (ESC) + Exportar SRT */}
-        <div className="flex items-center gap-2">
           <button
             onClick={triggerPanic}
-            className="flex items-center gap-1.5 bg-red-950/80 hover:bg-red-900 text-red-200 border border-red-800/80 px-3 py-1.5 rounded-md text-xs font-semibold transition shadow-sm"
-            title="Vaciar cola y callar a Loquendo inmediatamente (Atajo: Tecla Esc)"
+            className="flex items-center gap-1.5 bg-red-950/80 hover:bg-red-900 text-red-200 border border-red-800/80 px-3 py-1.5 rounded-md text-xs font-semibold transition"
+            title="Vaciar cola y callar a Loquendo inmediatamente (Atajo: Esc)"
           >
             <OctagonAlert className="w-3.5 h-3.5 text-red-400" />
-            <span>PÁNICO (ESC)</span>
+            <span>PÁNICO</span>
           </button>
 
           <button
             onClick={handleExportSRT}
             disabled={subtitlesLog.length === 0}
             className="flex items-center gap-1.5 bg-emerald-950/70 hover:bg-emerald-900/80 disabled:opacity-40 disabled:pointer-events-none text-emerald-200 border border-emerald-800/70 px-3 py-1.5 rounded-md text-xs font-medium transition"
-            title="Descargar subtítulos .SRT sincronizados con el tiempo del gameplay"
+            title="Descargar subtítulos .SRT sincronizados con el gameplay"
           >
             <Download className="w-3.5 h-3.5 text-emerald-400" />
             <span>.SRT ({subtitlesLog.length})</span>
@@ -584,117 +781,141 @@ export default function App() {
         </div>
       </header>
 
-      {/* CUERPO PRINCIPAL: REPRODUCTOR DE VIDEO (OBS-FRIENDLY) + PANEL LATERAL */}
+      {/* 2. CUERPO PRINCIPAL: CONSOLA DE TRANSPORTE DE VIDEO + COLA + MACROS + SRT */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        {/* ÁREA CENTRAL DE VIDEO (Sin bordes molestos para captura limpia en OBS) */}
-        <div className="flex-1 flex flex-col bg-black relative min-w-0">
-          <div className="flex-1 relative flex items-center justify-center overflow-hidden bg-black">
-            {videoSource ? (
-              <video
-                ref={videoRef}
-                src={videoSource.fileUrl}
-                className="w-full h-full object-contain bg-black"
-                onClick={togglePlay}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
-                onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
-                onLoadedMetadata={() => {
-                  setDuration(videoRef.current?.duration || 0);
-                  if (videoRef.current) videoRef.current.volume = videoVolume;
-                }}
-              />
-            ) : (
-              <div className="flex flex-col items-center justify-center text-center p-8 max-w-md">
-                <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-4">
-                  <FolderOpen className="w-8 h-8 text-zinc-500" />
+        {/* PANEL IZQUIERDO: CONSOLA MAESTRA DE TRANSPORTE DE VIDEO */}
+        <div className="flex-1 flex flex-col p-4 bg-zinc-950 overflow-y-auto space-y-4">
+          {/* Tarjeta de Estado del Gameplay en la Ventana de Video */}
+          <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-5 shadow-sm space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className={`w-3 h-3 rounded-full ${videoStatus.isPlaying ? 'bg-emerald-400 animate-ping' : 'bg-amber-500'}`} />
+                <div>
+                  <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                    <span>{videoStatus.videoSource ? videoStatus.videoSource.fileName : 'Sin video cargado'}</span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
+                      Ventana 2 (F11)
+                    </span>
+                  </h2>
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    {videoStatus.isPlaying ? 'Reproduciendo en ventana externa' : 'Pausado'} • Subtítulos Loquendo: {showCaptionsOnVideo ? 'Visibles' : 'Ocultos'}
+                  </p>
                 </div>
-                <h2 className="text-base font-semibold text-zinc-200 mb-1">
-                  Ningún gameplay cargado
-                </h2>
-                <p className="text-xs text-zinc-500 mb-5 leading-relaxed">
-                  Selecciona un archivo de video local (<code className="text-zinc-400">.mp4</code>,{' '}
-                  <code className="text-zinc-400">.mkv</code>, <code className="text-zinc-400">.webm</code>) para
-                  empezar a grabar tus reacciones con Loquendo en vivo.
-                </p>
-                <button
-                  onClick={handleOpenVideo}
-                  className="bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold text-xs px-4 py-2 rounded-md transition"
-                >
-                  Seleccionar Video de Gameplay
-                </button>
               </div>
-            )}
 
-            {/* Overlay sutil cuando el Modo Pausa Inteligente detiene el video para redactar */}
-            {autoPausedIndicator && (
-              <div className="absolute top-4 left-4 flex items-center gap-2 bg-amber-950/90 border border-amber-500/40 text-amber-200 px-3 py-1.5 rounded-md text-xs font-medium backdrop-blur-sm">
-                <Pause className="w-3.5 h-3.5 text-amber-400" />
-                <span>Pausa Inteligente activa — Presiona Enter para hablar y reanudar</span>
-              </div>
-            )}
-
-            {/* Subtítulo flotante opcional de lo que Loquendo está pronunciando en este instante */}
-            {ttsState.currentItem && (
-              <div className="absolute bottom-5 left-1/2 -translate-x-1/2 max-w-[85%] bg-black/80 border border-zinc-800/90 px-4 py-2 rounded-md text-center pointer-events-none">
-                <p className="text-sm md:text-base font-semibold text-amber-300 tracking-wide drop-shadow">
-                  “{ttsState.currentItem.text}”
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* CONTROLES DE REPRODUCCIÓN DEL VIDEO */}
-          <div className="h-11 bg-zinc-900/90 border-t border-zinc-800/80 px-4 flex items-center gap-4 shrink-0">
-            <button
-              onClick={togglePlay}
-              disabled={!videoSource}
-              className="text-zinc-200 hover:text-amber-400 disabled:opacity-40 transition"
-              title={isPlaying ? 'Pausar video' : 'Reproducir video'}
-            >
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-            </button>
-
-            <span className="text-xs font-mono text-zinc-400 w-24 shrink-0">
-              {formatDisplayTime(currentTime)} / {formatDisplayTime(duration)}
-            </span>
-
-            <input
-              type="range"
-              min="0"
-              max={duration || 100}
-              step="0.1"
-              value={currentTime}
-              disabled={!videoSource}
-              onChange={handleSeek}
-              className="flex-1 accent-amber-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-            />
-
-            {/* Volumen independiente del video */}
-            <div className="flex items-center gap-2 w-32 shrink-0">
-              <button onClick={toggleMuteVideo} className="text-zinc-400 hover:text-zinc-200">
-                {isVideoMuted || videoVolume === 0 ? (
-                  <VolumeX className="w-4 h-4 text-red-400" />
-                ) : (
-                  <Volume2 className="w-4 h-4" />
-                )}
+              {/* Atajo rápido de pantalla completa para el video */}
+              <button
+                onClick={() => window.loquendoAPI?.toggleVideoFullScreen()}
+                className="flex items-center gap-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs px-3 py-1.5 rounded-lg border border-zinc-700 transition"
+                title="Conmutar pantalla completa en la ventana de video"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-amber-400" />
+                <span>Pantalla Completa (F11)</span>
               </button>
+            </div>
+
+            {/* Línea de tiempo interactiva (Seek) */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                <span className="text-amber-400 font-semibold">{formatDisplayTime(videoStatus.currentTime)}</span>
+                <span>{formatDisplayTime(videoStatus.duration)}</span>
+              </div>
               <input
                 type="range"
                 min="0"
-                max="1"
-                step="0.02"
-                value={isVideoMuted ? 0 : videoVolume}
-                onChange={handleVideoVolumeChange}
-                className="w-full accent-zinc-400 h-1 bg-zinc-800 rounded-lg cursor-pointer"
-                title="Volumen del video (independiente de la voz Loquendo)"
+                max={videoStatus.duration || 100}
+                step="0.1"
+                value={videoStatus.currentTime}
+                disabled={!videoStatus.videoSource}
+                onChange={handleSeek}
+                className="w-full accent-amber-500 h-2 bg-zinc-800 rounded-lg cursor-pointer"
               />
             </div>
+
+            {/* Botones de Control de Transporte */}
+            <div className="flex items-center justify-between pt-1">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleSkip(-5)}
+                  disabled={!videoStatus.videoSource}
+                  className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-40 transition"
+                  title="Retroceder 5 segundos"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+
+                <button
+                  onClick={togglePlay}
+                  disabled={!videoStatus.videoSource}
+                  className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-zinc-950 font-bold px-4 py-2 rounded-lg transition shadow-md"
+                  title={videoStatus.isPlaying ? 'Pausar Video' : 'Reproducir Video'}
+                >
+                  {videoStatus.isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current" />}
+                  <span>{videoStatus.isPlaying ? 'PAUSAR' : 'REPRODUCIR'}</span>
+                </button>
+
+                <button
+                  onClick={() => handleSkip(5)}
+                  disabled={!videoStatus.videoSource}
+                  className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-40 transition"
+                  title="Avanzar 5 segundos"
+                >
+                  <RotateCw className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Control de Volumen Independiente del Video */}
+              <div className="flex items-center gap-2.5 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5">
+                <button onClick={toggleMute} className="text-zinc-400 hover:text-zinc-200">
+                  {isVideoMuted || videoVolume === 0 ? (
+                    <VolumeX className="w-4 h-4 text-red-400" />
+                  ) : (
+                    <Volume2 className="w-4 h-4" />
+                  )}
+                </button>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.02"
+                  value={isVideoMuted ? 0 : videoVolume}
+                  onChange={handleVolumeChange}
+                  className="w-24 accent-amber-500 h-1 bg-zinc-800 rounded-lg cursor-pointer"
+                  title="Volumen del gameplay en la ventana de video"
+                />
+                <span className="text-[11px] font-mono text-zinc-400 w-8 text-right">
+                  {Math.round((isVideoMuted ? 0 : videoVolume) * 100)}%
+                </span>
+              </div>
+            </div>
+
+            {/* Aviso sutil de Pausa Inteligente */}
+            {autoPausedIndicator && (
+              <div className="flex items-center gap-2 bg-amber-950/80 border border-amber-500/40 text-amber-200 px-3.5 py-2 rounded-lg text-xs font-medium">
+                <Pause className="w-4 h-4 text-amber-400" />
+                <span>Pausa Inteligente activa: El video se pausó mientras escribes. Pulsa Enter para hablar y reanudarlo.</span>
+              </div>
+            )}
+          </div>
+
+          {/* Tarjeta de Guía Rápida para OBS y Dual Monitor */}
+          <div className="bg-zinc-900/40 border border-zinc-800/80 rounded-xl p-4 text-xs text-zinc-400 space-y-1.5">
+            <h3 className="font-semibold text-zinc-200 flex items-center gap-1.5">
+              <Monitor className="w-4 h-4 text-amber-400" />
+              Modo Dos Ventanas para Creadores de Contenido
+            </h3>
+            <p className="leading-relaxed">
+              • <strong>Ventana 2 (Pantalla de Video):</strong> Colócala en tu segundo monitor o selecciónala en OBS como <code className="text-zinc-300">Captura de Ventana</code>.
+            </p>
+            <p className="leading-relaxed">
+              • Pulsa <code className="text-amber-400 font-mono font-bold">F11</code> en la ventana del video para dejarla en pantalla completa ultra limpia, mostrando solo el gameplay y los subtítulos de Loquendo sin distracciones.
+            </p>
           </div>
         </div>
 
-        {/* PANEL LATERAL DERECHO: COLA FIFO EN TIEMPO REAL + MACROS F1-F8 + HISTORIAL SRT */}
-        <aside className="w-80 border-l border-zinc-800/80 bg-zinc-900/40 flex flex-col shrink-0">
-          {/* 1. Estado de la Cola FIFO */}
+        {/* PANEL DERECHO: COLA FIFO + MACROS F1-F8 + REGISTRO SRT */}
+        <aside className="w-84 border-l border-zinc-800/80 bg-zinc-900/40 flex flex-col shrink-0">
+          {/* 1. Cola FIFO Loquendo */}
           <div className="p-3 border-b border-zinc-800/80">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
@@ -712,7 +933,7 @@ export default function App() {
               </span>
             </div>
 
-            <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
+            <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
               {ttsState.currentItem && (
                 <div className="bg-emerald-950/50 border border-emerald-700/50 rounded px-2.5 py-1.5 text-xs flex items-center justify-between">
                   <span className="text-emerald-200 font-medium truncate">
@@ -739,7 +960,7 @@ export default function App() {
               ))}
 
               {!ttsState.currentItem && ttsState.queue.length === 0 && (
-                <p className="text-[11px] text-zinc-500 italic py-2 text-center">
+                <p className="text-[11px] text-zinc-500 italic py-1 text-center">
                   Cola vacía. Escribe abajo o pulsa F1–F8.
                 </p>
               )}
@@ -748,7 +969,7 @@ export default function App() {
 
           {/* 2. Panel de Macros Rápidas (F1 a F8) */}
           <div className="p-3 border-b border-zinc-800/80 flex-1 overflow-y-auto">
-            <div className="flex items-center justify-between mb-2.5">
+            <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
                 <Keyboard className="w-3.5 h-3.5 text-amber-400" />
                 Macros Rápidas (F1–F8)
@@ -773,7 +994,7 @@ export default function App() {
               {macros.map((m, idx) => (
                 <div
                   key={m.key}
-                  className="group bg-zinc-900/90 hover:bg-zinc-800/90 border border-zinc-800 rounded-md p-2 transition"
+                  className="group bg-zinc-900/90 hover:bg-zinc-800/90 border border-zinc-800 rounded-md p-1.5 transition"
                 >
                   {editingMacros ? (
                     <div className="space-y-1">
@@ -789,7 +1010,6 @@ export default function App() {
                             copy[idx] = { ...copy[idx], label: e.target.value };
                             setMacros(copy);
                           }}
-                          placeholder="Título corto"
                           className="bg-zinc-950 border border-zinc-700 rounded px-1.5 py-0.5 text-xs text-zinc-200 w-full focus:outline-none"
                         />
                       </div>
@@ -801,7 +1021,6 @@ export default function App() {
                           copy[idx] = { ...copy[idx], text: e.target.value };
                           setMacros(copy);
                         }}
-                        placeholder="Frase que dirá Loquendo"
                         className="bg-zinc-950 border border-zinc-700 rounded px-1.5 py-1 text-xs text-zinc-300 w-full focus:outline-none"
                       />
                     </div>
@@ -825,7 +1044,7 @@ export default function App() {
           </div>
 
           {/* 3. Historial Teleprompter / Registro SRT */}
-          <div className="p-3 h-44 flex flex-col bg-zinc-950/60">
+          <div className="p-3 h-40 flex flex-col bg-zinc-950/60">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
                 <FileText className="w-3.5 h-3.5 text-emerald-400" />
@@ -835,7 +1054,6 @@ export default function App() {
                 <button
                   onClick={() => setSubtitlesLog([])}
                   className="text-[11px] text-zinc-500 hover:text-red-400 flex items-center gap-1"
-                  title="Limpiar historial de subtítulos"
                 >
                   <Trash2 className="w-3 h-3" /> Limpiar
                 </button>
@@ -844,8 +1062,8 @@ export default function App() {
 
             <div className="flex-1 overflow-y-auto space-y-1 pr-1">
               {subtitlesLog.length === 0 ? (
-                <p className="text-[11px] text-zinc-600 italic text-center mt-6">
-                  Tus intervenciones aparecerán aquí con marca de tiempo para exportar a .SRT
+                <p className="text-[11px] text-zinc-600 italic text-center mt-5">
+                  Tus reacciones aparecerán aquí con marca de tiempo para exportar a .SRT
                 </p>
               ) : (
                 subtitlesLog
@@ -869,7 +1087,7 @@ export default function App() {
         </aside>
       </div>
 
-      {/* CONSOLA INFERIOR DE REACCIÓN EN VIVO */}
+      {/* 3. CONSOLA INFERIOR DE REDACCIÓN EN VIVO */}
       <footer className="h-20 border-t border-zinc-800 bg-zinc-900/95 px-4 flex items-center gap-3 shrink-0">
         {/* Selector de Modo (Intercambiable con TAB) */}
         <button
@@ -879,7 +1097,7 @@ export default function App() {
               ? 'bg-emerald-950/60 border-emerald-700/70 text-emerald-200'
               : 'bg-amber-950/60 border-amber-700/70 text-amber-200'
           }`}
-          title="Presiona la tecla TAB para cambiar de modo en cualquier momento"
+          title="Presiona la tecla TAB para alternar entre Modo Tiempo Real y Modo Pausa Inteligente"
         >
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] font-mono uppercase px-1.5 py-0.2 bg-black/40 rounded border border-white/10">
@@ -891,12 +1109,12 @@ export default function App() {
           </div>
           <span className="text-[10px] opacity-80 mt-0.5">
             {typingMode === 'REALTIME'
-              ? `Habla continua en ráfagas de ${chunkSize} palabras o Enter`
+              ? `Ráfagas de ${chunkSize}p o Enter`
               : 'Pausa el video al escribir • Enter habla y reanuda'}
           </span>
         </button>
 
-        {/* Selector de Tamaño de Bloque y Ajustes para Modo Tiempo Real */}
+        {/* Selector de Tamaño de Ráfaga y Ajustes */}
         {typingMode === 'REALTIME' && (
           <div
             className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg p-1 h-12 shrink-0"
@@ -924,12 +1142,11 @@ export default function App() {
               </button>
             ))}
 
-            {/* Botón Ajustes de Ritmo / Inactividad */}
             <button
               type="button"
               onClick={() => setIsSettingsOpen(true)}
               className="h-8 px-2 rounded text-zinc-400 hover:text-amber-400 hover:bg-zinc-800 transition flex items-center justify-center ml-0.5 border-l border-zinc-800"
-              title="Configurar rango de palabras y auto-envío por tiempo de inactividad"
+              title="Ajustes de ritmo, rango de palabras y tiempo de inactividad"
             >
               <Settings className="w-3.5 h-3.5" />
             </button>
@@ -949,7 +1166,7 @@ export default function App() {
                 ? `Escribe continuamente... se envía cada ${chunkSize} palabras${
                     idleAutoSend ? ` o tras ${idleTimeoutSec.toFixed(1)}s de pausa` : ''
                   } (o Enter)`
-                : 'Empieza a escribir para pausar el gameplay automáticamente... presiona Enter para que Loquendo lea toda la frase y reanude el video'
+                : 'Empieza a escribir para pausar la Ventana de Video... presiona Enter para que Loquendo hable y reanude el video'
             }
             className="w-full h-12 bg-zinc-950 border border-zinc-700 focus:border-amber-500 rounded-lg pl-4 pr-52 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none transition shadow-inner"
             autoFocus
@@ -1016,11 +1233,10 @@ export default function App() {
         </div>
       </footer>
 
-      {/* MODAL FLOTANTE DE AJUSTES DE RITMO Y HABLA */}
+      {/* 4. MODAL FLOTANTE DE AJUSTES DE RITMO Y HABLA */}
       {isSettingsOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-md w-full p-6 shadow-2xl relative space-y-6">
-            {/* Cabecera */}
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
@@ -1039,7 +1255,7 @@ export default function App() {
               </button>
             </div>
 
-            {/* 1. Rango de palabras por ráfaga */}
+            {/* Rango de palabras por ráfaga */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-zinc-200">
@@ -1068,7 +1284,7 @@ export default function App() {
               </p>
             </div>
 
-            {/* 2. Auto-envío por inactividad */}
+            {/* Auto-envío por inactividad */}
             <div className="space-y-3 pt-3 border-t border-zinc-800/80">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -1121,7 +1337,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Botón Guardar / Cerrar */}
             <div className="pt-2">
               <button
                 onClick={() => setIsSettingsOpen(false)}
@@ -1137,3 +1352,16 @@ export default function App() {
   );
 }
 
+// ============================================================================
+// 3. ENRUTADOR PRINCIPAL (Determina si renderiza VideoWindow o StudioWindow)
+// ============================================================================
+export default function App() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const viewMode = urlParams.get('view') || 'studio';
+
+  if (viewMode === 'video') {
+    return <VideoWindow />;
+  }
+
+  return <StudioWindow />;
+}

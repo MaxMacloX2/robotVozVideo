@@ -3,85 +3,186 @@ const path = require('path');
 const fs = require('fs');
 const { TTSBridge } = require('./ttsBridge.cjs');
 
-let mainWindow = null;
+let studioWindow = null;
+let videoWindow = null;
 const tts = new TTSBridge();
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1080,
-    minHeight: 720,
+const isDev = !app.isPackaged;
+const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+
+function getAppUrl(viewName) {
+  if (isDev) {
+    return `${devUrl}?view=${viewName}`;
+  }
+  const indexPath = path.join(__dirname, '../dist/index.html');
+  return `file://${indexPath}?view=${viewName}`;
+}
+
+// 1. Ventana de Estudio y Redacción
+function createStudioWindow() {
+  studioWindow = new BrowserWindow({
+    width: 1200,
+    height: 820,
+    minWidth: 980,
+    minHeight: 640,
     backgroundColor: '#09090b',
-    title: 'Loquendo Reaction Studio',
+    title: 'Loquendo Reaction Studio - Consola de Control',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false // Permite reproducir archivos locales de video (file://) sin restricciones CORS en dev
+      webSecurity: false
     }
   });
 
-  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
-  const isDev = !app.isPackaged;
-
+  const url = getAppUrl('studio');
   if (isDev) {
-    mainWindow.loadURL(devUrl);
+    studioWindow.loadURL(url);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    studioWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query: { view: 'studio' } });
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  studioWindow.on('closed', () => {
+    studioWindow = null;
+    // Si se cierra la consola de estudio principal, cerrar la aplicación completa
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      videoWindow.close();
+    }
   });
 }
 
-// Reenviar eventos del puente TTS al proceso de renderizado (React)
+// 2. Ventana de Video Dedicada (OBS-Clean, con soporte de Pantalla Completa F11)
+function createVideoWindow() {
+  if (videoWindow && !videoWindow.isDestroyed()) {
+    videoWindow.show();
+    videoWindow.focus();
+    return;
+  }
+
+  videoWindow = new BrowserWindow({
+    width: 1280,
+    height: 720,
+    minWidth: 640,
+    minHeight: 360,
+    backgroundColor: '#000000',
+    title: 'Loquendo Reaction Studio - Pantalla de Video (F11)',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: false
+    }
+  });
+
+  const url = getAppUrl('video');
+  if (isDev) {
+    videoWindow.loadURL(url);
+  } else {
+    videoWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query: { view: 'video' } });
+  }
+
+  // Atajo de teclado F11 para conmutar pantalla completa limpia
+  videoWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F11' && input.type === 'keyDown') {
+      const isFull = !videoWindow.isFullScreen();
+      videoWindow.setFullScreen(isFull);
+      event.preventDefault();
+    }
+  });
+
+  videoWindow.on('enter-full-screen', () => {
+    const notify = (win) => win && !win.isDestroyed() && win.webContents.send('window:fullscreen-change', true);
+    notify(videoWindow);
+    notify(studioWindow);
+  });
+
+  videoWindow.on('leave-full-screen', () => {
+    const notify = (win) => win && !win.isDestroyed() && win.webContents.send('window:fullscreen-change', false);
+    notify(videoWindow);
+    notify(studioWindow);
+  });
+
+  videoWindow.on('closed', () => {
+    videoWindow = null;
+    if (studioWindow && !studioWindow.isDestroyed()) {
+      studioWindow.webContents.send('video:status', { isConnected: false });
+    }
+  });
+}
+
+// Reenviar eventos TTS tanto al Estudio como a la Ventana de Video (para los subtítulos)
 function setupTTSEvents() {
-  const sendToRenderer = (channel, payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(channel, payload);
+  const sendToAllWindows = (channel, payload) => {
+    if (studioWindow && !studioWindow.isDestroyed()) {
+      studioWindow.webContents.send(channel, payload);
+    }
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      videoWindow.webContents.send(channel, payload);
     }
   };
 
-  tts.on('voices', (data) => sendToRenderer('tts:voices', data));
-  tts.on('status', (state) => sendToRenderer('tts:status', state));
-  tts.on('speaking', (info) => sendToRenderer('tts:speaking', info));
-  tts.on('item-finished', (info) => sendToRenderer('tts:item-finished', info));
-  tts.on('queue-empty', () => sendToRenderer('tts:queue-empty'));
-  tts.on('panic', () => sendToRenderer('tts:panic'));
+  tts.on('voices', (data) => sendToAllWindows('tts:voices', data));
+  tts.on('status', (state) => sendToAllWindows('tts:status', state));
+  tts.on('speaking', (info) => sendToAllWindows('tts:speaking', info));
+  tts.on('item-finished', (info) => sendToAllWindows('tts:item-finished', info));
+  tts.on('queue-empty', () => sendToAllWindows('tts:queue-empty'));
+  tts.on('panic', () => sendToAllWindows('tts:panic'));
 
-  // Iniciar puente PowerShell priorizando SysWOW64 (32-bit) para detectar Loquendo TTS 7 + SAPI 5
+  // Iniciar puente PowerShell priorizando SysWOW64 (32-bit Loquendo TTS 7)
   tts.init(true);
 }
 
-// Controladores IPC seguros
+// Controladores IPC para sincronización entre Estudio y Video
 function setupIPC() {
+  // TTS
   ipcMain.handle('tts:get-state', () => tts.getState());
-
-  ipcMain.handle('tts:enqueue', (_event, payload) => {
-    return tts.enqueue(payload);
-  });
-
+  ipcMain.handle('tts:enqueue', (_event, payload) => tts.enqueue(payload));
   ipcMain.handle('tts:stop-all', () => {
     tts.stopAll();
     return tts.getState();
   });
-
-  ipcMain.handle('tts:set-config', (_event, config) => {
-    return tts.setConfig(config);
-  });
-
+  ipcMain.handle('tts:set-config', (_event, config) => tts.setConfig(config));
   ipcMain.handle('tts:refresh-voices', (_event, prefer32Bit = true) => {
     tts.init(prefer32Bit);
     return tts.getState();
   });
 
-  // Selector nativo de archivos de video (.mp4, .mkv, .webm)
+  // Comunicación bidireccional entre ventanas
+  // Estudio -> Video (Play, Pause, Seek, Load, Volume)
+  ipcMain.on('video:action', (_event, action) => {
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      videoWindow.webContents.send('video:action', action);
+    }
+  });
+
+  // Video -> Estudio (currentTime, duration, isPlaying)
+  ipcMain.on('video:status', (_event, status) => {
+    if (studioWindow && !studioWindow.isDestroyed()) {
+      studioWindow.webContents.send('video:status', status);
+    }
+  });
+
+  // Apertura y control de pantalla completa de la ventana de video
+  ipcMain.handle('window:open-video', () => {
+    createVideoWindow();
+    return true;
+  });
+
+  ipcMain.handle('window:toggle-video-fullscreen', () => {
+    if (videoWindow && !videoWindow.isDestroyed()) {
+      const next = !videoWindow.isFullScreen();
+      videoWindow.setFullScreen(next);
+      return next;
+    }
+    return false;
+  });
+
+  // Diálogo para seleccionar video
   ipcMain.handle('dialog:open-video', async () => {
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const parent = studioWindow || null;
+    const result = await dialog.showOpenDialog(parent, {
       title: 'Seleccionar Gameplay Pregrabado',
       properties: ['openFile'],
       filters: [
@@ -98,10 +199,10 @@ function setupIPC() {
     };
   });
 
-  // Guardar archivo de subtítulos .SRT generado durante la sesión
+  // Diálogo para exportar subtítulos .SRT
   ipcMain.handle('dialog:save-srt', async (_event, { defaultName, content }) => {
-    if (!mainWindow) return { saved: false };
-    const result = await dialog.showSaveDialog(mainWindow, {
+    const parent = studioWindow || null;
+    const result = await dialog.showSaveDialog(parent, {
       title: 'Exportar Subtítulos de Reacción (.srt)',
       defaultPath: defaultName || 'reaccion-loquendo.srt',
       filters: [{ name: 'SubRip Subtitles (.srt)', extensions: ['srt'] }]
@@ -112,9 +213,11 @@ function setupIPC() {
   });
 }
 
+// Inicialización de la aplicación: abre automáticamente ambas ventanas
 app.whenReady().then(() => {
   setupIPC();
-  createWindow();
+  createStudioWindow();
+  createVideoWindow();
   setupTTSEvents();
 });
 
@@ -128,4 +231,3 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   tts.dispose();
 });
-

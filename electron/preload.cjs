@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('loquendoAPI', {
-  // Acciones de TTS
+  // Acciones de TTS (SAPI 5 / Loquendo)
   getState: () => ipcRenderer.invoke('tts:get-state'),
   enqueue: (payload) => ipcRenderer.invoke('tts:enqueue', payload),
   stopAll: () => ipcRenderer.invoke('tts:stop-all'),
@@ -12,6 +12,22 @@ contextBridge.exposeInMainWorld('loquendoAPI', {
   openVideoDialog: () => ipcRenderer.invoke('dialog:open-video'),
   saveSrtDialog: (data) => ipcRenderer.invoke('dialog:save-srt', data),
 
+  // Control y sincronización Multi-Ventana (Estudio <-> Visor de Video)
+  sendVideoAction: (action) => ipcRenderer.send('video:action', action),
+  onVideoAction: (callback) => {
+    const listener = (_event, action) => callback(action);
+    ipcRenderer.on('video:action', listener);
+    return () => ipcRenderer.removeListener('video:action', listener);
+  },
+  sendVideoStatus: (status) => ipcRenderer.send('video:status', status),
+  onVideoStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('video:status', listener);
+    return () => ipcRenderer.removeListener('video:status', listener);
+  },
+  openVideoWindow: () => ipcRenderer.invoke('window:open-video'),
+  toggleVideoFullScreen: () => ipcRenderer.invoke('window:toggle-video-fullscreen'),
+
   // Suscripción a eventos en tiempo real desde el proceso principal
   onEvent: (channel, callback) => {
     const allowedChannels = [
@@ -20,7 +36,8 @@ contextBridge.exposeInMainWorld('loquendoAPI', {
       'tts:speaking',
       'tts:item-finished',
       'tts:queue-empty',
-      'tts:panic'
+      'tts:panic',
+      'window:fullscreen-change'
     ];
     if (!allowedChannels.includes(channel)) return () => {};
     const listener = (_event, data) => callback(data);
@@ -28,4 +45,3 @@ contextBridge.exposeInMainWorld('loquendoAPI', {
     return () => ipcRenderer.removeListener(channel, listener);
   }
 });
-
